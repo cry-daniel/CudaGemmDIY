@@ -1,11 +1,11 @@
 #include "kernel.cu"
 
-#define CheckWithCPU
+// #define CheckWithCPU
 
-#define SCALE 128
+#define SCALE 512
 #define M SCALE
-#define K SCALE
-#define N SCALE
+#define K 256
+#define N 128
 #define M_MAT_A_ROW_NUM         M //how many rows in A
 #define K_MAT_A_COLUMN_NUM      K //how many column in A
 #define K_MAT_B_ROW_NUM         K_MAT_A_COLUMN_NUM //how many rows in B

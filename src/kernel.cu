@@ -117,12 +117,12 @@ cudaError_t mulMatrixWithCublasCuda(float* c, float* a, float* b, int m, int k, 
     // Result in row-major format
     CHECK_CUBLAS(cublasGemmEx(handle,
                               CUBLAS_OP_N, CUBLAS_OP_N,
-                              m, n, k,
+                              n, m, k,
                               &alpha,
-                              b, CUDA_R_32F, k,
-                              a, CUDA_R_32F, m,
+                              b, CUDA_R_32F, n,
+                              a, CUDA_R_32F, k,
                               &beta,
-                              c, CUDA_R_32F, m,
+                              c, CUDA_R_32F, n,
                               CUDA_R_32F,
                               CUBLAS_GEMM_DEFAULT));
 
@@ -165,12 +165,12 @@ cudaError_t mulMatrixWithCublasTC(float* c, float* a, float* b, int m, int k, in
     // Result in row-major format
     CHECK_CUBLAS(cublasGemmEx(handle,
                               CUBLAS_OP_N, CUBLAS_OP_N,
-                              m, n, k,
+                              n, m, k,
                               &alpha,
-                              b, CUDA_R_32F, k,
-                              a, CUDA_R_32F, m,
+                              b, CUDA_R_32F, n,
+                              a, CUDA_R_32F, k,
                               &beta,
-                              c, CUDA_R_32F, m,
+                              c, CUDA_R_32F, n,
                               CUDA_R_32F,
                               CUBLAS_GEMM_DEFAULT_TENSOR_OP));
 
