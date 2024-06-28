@@ -2,10 +2,10 @@
 
 // #define CheckWithCPU
 
-#define SCALE 512
+#define SCALE 340
 #define M SCALE
-#define K 256
-#define N 128
+#define K SCALE
+#define N SCALE
 #define M_MAT_A_ROW_NUM         M //how many rows in A
 #define K_MAT_A_COLUMN_NUM      K //how many column in A
 #define K_MAT_B_ROW_NUM         K_MAT_A_COLUMN_NUM //how many rows in B

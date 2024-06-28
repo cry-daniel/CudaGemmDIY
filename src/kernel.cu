@@ -98,6 +98,7 @@ cudaError_t mulMatrixWithNaiveCuda(float* c, float* a, float* b, int m, int k, i
 }
 
 // A: row major; B: row major; C: row major;
+/* Cublas Cuda perform almost same as Cublas TC, since parameter 'cublasGemmAlgo_t' doesn't have effect on NVIDIA Ampere architecture GPUs (A100) and newer. (https://docs.nvidia.com/cuda/cublas/index.html?highlight=gemmEx#cublasgemmalgo-t) */
 cudaError_t mulMatrixWithCublasCuda(float* c, float* a, float* b, int m, int k, int n)
 {
     cudaError_t cudaStatus = cudaSuccess;
@@ -192,3 +193,4 @@ cudaError_t mulMatrixWithCublasTC(float* c, float* a, float* b, int m, int k, in
 
     return cudaStatus;
 }
+
