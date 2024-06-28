@@ -1,0 +1,359 @@
+﻿
+#include "cuda_runtime.h"
+#include <cublas_v2.h>
+#include "device_launch_parameters.h"
+#include <iostream>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+#define SCALE 2
+
+#define M_MAT_A_ROW_NUM         SCALE //how many rows in A
+#define K_MAT_A_COLUMN_NUM      SCALE //how many column in A
+#define K_MAT_B_ROW_NUM         K_MAT_A_COLUMN_NUM //how many rows in B
+#define N_MAT_B_COLUMN_NUM      SCALE //how many column in B
+
+#define V100
+#ifdef RTX3060
+#define SM_NUM                  30
+#define CUDA_CORE_PER_SM        128
+#define CUDA_CORE_PER_WARP      16
+#else 
+#ifdef V100
+#define SM_NUM   80
+#define CUDA_CORE_PER_SM        64
+#define CUDA_CORE_PER_WARP      16
+#else
+#define SM_NUM   40
+#define CUDA_CORE_PER_SM        128
+#define CUDA_CORE_PER_WARP      16
+#endif
+#endif
+#define M_MAT_C_ROW_NUM         M_MAT_A_ROW_NUM        //how many rows in C
+#define N_MAT_C_COLUMN_NUM      N_MAT_B_COLUMN_NUM     //how many column in C
+#define MATRIX_GLOBAL_SIZE      (M_MAT_C_ROW_NUM * N_MAT_C_COLUMN_NUM)
+
+#define CHECK_CUDA(call) { \
+    const cudaError_t error = call; \
+    if (error != cudaSuccess) { \
+        std::cerr << "Error: " << __FILE__ << ":" << __LINE__ << ", code: " << error \
+                  << ", reason: " << cudaGetErrorString(error) << std::endl; \
+        exit(1); \
+    } \
+}
+
+#define CHECK_CUBLAS(call) { \
+    const cublasStatus_t status = call; \
+    if (status != CUBLAS_STATUS_SUCCESS) { \
+        std::cerr << "Error: " << __FILE__ << ":" << __LINE__ << ", reason: " << status << std::endl; \
+        exit(1); \
+    } \
+}
+
+void mulMatrixWithCpu(float* c, float* a, float* b);
+cudaError_t mulMatrixWithCuda(float *c, float *a, float *b);
+cudaError_t mulMatrixWithTensorCore(float *c, float *a, float *b, int m, int n, int k);
+
+//C = aAB+bC
+__global__ void mulKernel(float* c, float* a, float* b)
+{
+    int i = 0;
+    int j = 0;
+    for(int index = blockIdx.x * blockDim.x + threadIdx.x;index < MATRIX_GLOBAL_SIZE;index+=gridDim.x*blockDim.x)
+    {
+        i = index / N_MAT_C_COLUMN_NUM;
+        j = index % N_MAT_C_COLUMN_NUM;
+        for (int k = 0; k < K_MAT_A_COLUMN_NUM; k++)
+        {
+            // c[index] += a[i + k * M_MAT_A_ROW_NUM] * b[K_MAT_A_COLUMN_NUM * j + k];
+            c[index] += a[i * K_MAT_A_COLUMN_NUM + k] * b[j + k * N_MAT_B_COLUMN_NUM];
+        }
+    }
+}
+
+
+int main()
+{
+    float* a = (float*)malloc(M_MAT_A_ROW_NUM * K_MAT_A_COLUMN_NUM*sizeof(float));
+    float* b = (float*)malloc(K_MAT_B_ROW_NUM * N_MAT_B_COLUMN_NUM*sizeof(float));
+    float* c_gpu_result = (float*)malloc(MATRIX_GLOBAL_SIZE*sizeof(float));
+    float* c_cpu_result = (float*)malloc(MATRIX_GLOBAL_SIZE*sizeof(float));
+    float* c_tc_result = (float*)malloc(MATRIX_GLOBAL_SIZE*sizeof(float));
+
+    srand((unsigned)time(NULL));
+    for(int i=0;i< MATRIX_GLOBAL_SIZE;i++)
+    {
+        c_gpu_result[i] = 0.0;
+        c_cpu_result[i] = 0.0;
+        c_tc_result[i] = 0.0;
+    }
+    for (int i = 0; i < M_MAT_A_ROW_NUM * K_MAT_A_COLUMN_NUM; i++)
+        // a[i] = (rand() % 3)/3.0;// (111.1f / (float)i) % 2.4f;
+        a[i] = i;
+    for (int i = 0; i < K_MAT_B_ROW_NUM * N_MAT_B_COLUMN_NUM; i++)
+        // b[i] = (rand() % 3)/3.0;// (i / 111.0) % 3.0;
+        b[i] = i+1;
+    
+    mulMatrixWithCpu(c_cpu_result, a, b);
+
+    // Multiply matrix in parallel.
+    cudaError_t cudaStatus = mulMatrixWithCuda(c_gpu_result, a, b);
+    if (cudaStatus != cudaSuccess) {
+        fprintf(stderr, "addWithCuda failed!");
+        return 1;
+    }
+
+    mulMatrixWithTensorCore(c_tc_result, a, b, M_MAT_A_ROW_NUM, N_MAT_B_COLUMN_NUM, K_MAT_A_COLUMN_NUM);
+
+    printf("Sample results:\n");
+    for(int i=0;i<16;i++)
+        printf("tc[%d]: %5f,gpu[%d]:%5f\n",i, c_tc_result[i],i, c_gpu_result[i]);
+
+    // printf("\n\nStarting validation the result...\n ");
+    // for (int i = 0; i < MATRIX_GLOBAL_SIZE; i++)
+    //     if (c_cpu_result[i] - c_gpu_result[i] > 0.01 || c_gpu_result[i] - c_cpu_result[i] > 0.01)
+    //         printf("c[%d] is not correct\n",i);
+    // printf("Validation is completed.\n ");
+    // cudaDeviceReset must be called before exiting in order for profiling and
+    // tracing tools such as Nsight and Visual Profiler to show complete traces.
+    cudaStatus = cudaDeviceReset();
+    if (cudaStatus != cudaSuccess) {
+        fprintf(stderr, "cudaDeviceReset failed!");
+        return 1;
+    }
+
+    return 0;
+}
+//A: column major; B: column major; C: row major;
+void mulMatrixWithCpu(float* c, float* a, float* b)
+{
+    int i_x = 0, i_y = 0;
+
+    for (int i = 0;i < M_MAT_A_ROW_NUM * N_MAT_B_COLUMN_NUM;i++)
+    {
+        printf("i: %d, a[i]: %f\n", i, a[i]);
+        i_x = i / N_MAT_C_COLUMN_NUM;  //i_x line of A,
+        i_y = i % N_MAT_C_COLUMN_NUM;  //i_y column of B;
+        for (int j = 0;j < K_MAT_A_COLUMN_NUM;j++)
+        {
+            // c[i] += a[i_x * + j * M_MAT_A_ROW_NUM] * b[j + i_y * K_MAT_B_ROW_NUM];
+            c[i] += a[i_x * K_MAT_A_COLUMN_NUM + j] * b[j * N_MAT_B_COLUMN_NUM + i_y];
+        }
+    }
+    for (int i = 0;i < M_MAT_A_ROW_NUM * N_MAT_B_COLUMN_NUM;i++)
+        printf("i: %d, c[i]: %f\n", i, c[i]);
+}
+
+__global__ void blank_warmingGPU() {}
+
+cudaError_t mulMatrixWithCuda(float* c, float* a, float* b)
+{
+    float *dev_a = NULL;
+    float *dev_b = NULL;
+    float* dev_c = NULL;
+    cudaError_t cudaStatus = cudaSuccess;
+
+    cudaStatus = cudaSetDevice(0);
+    if (cudaStatus != cudaSuccess){
+        printf("cudaStatus_1=%d \n", cudaStatus);
+        goto Error;
+    }
+
+    cudaStatus = cudaMalloc((float**)&dev_c, MATRIX_GLOBAL_SIZE * sizeof(float));
+    if (cudaStatus != cudaSuccess){
+        printf("cudaStatus_2=%d \n", cudaStatus);
+        goto Error;
+    }
+
+    cudaStatus = cudaMalloc((float**)&dev_a, M_MAT_A_ROW_NUM * K_MAT_A_COLUMN_NUM * sizeof(float));
+    if (cudaStatus != cudaSuccess) {
+        printf("cudaStatus_3=%d \n", cudaStatus);
+        goto Error;
+    }
+
+    cudaStatus=cudaMalloc((float**)&dev_b,K_MAT_B_ROW_NUM*N_MAT_B_COLUMN_NUM*sizeof(float));
+    if (cudaStatus != cudaSuccess) {
+        printf("cudaStatus_4=%d \n", cudaStatus);
+        goto Error;
+    }
+
+    cudaStatus = cudaMemcpy(dev_a, a, M_MAT_A_ROW_NUM * K_MAT_A_COLUMN_NUM * sizeof(float), cudaMemcpyHostToDevice);
+    if (cudaStatus != cudaSuccess) {
+        printf("cudaStatus_5=%d \n", cudaStatus);
+        goto Error;
+    }
+
+    cudaStatus = cudaMemcpy(dev_b, b, K_MAT_B_ROW_NUM * N_MAT_B_COLUMN_NUM * sizeof(float), cudaMemcpyHostToDevice);
+    if (cudaStatus != cudaSuccess) {
+        printf("cudaStatus_6=%d \n", cudaStatus);
+        goto Error;
+    }
+
+    blank_warmingGPU << <1, 1 >> > ();
+    // create two events
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    // record start event on the default stream
+    cudaEventRecord(start);
+    // execute kernel
+    mulKernel << <SM_NUM, 32*CUDA_CORE_PER_SM / CUDA_CORE_PER_WARP >> > (dev_c, dev_a, dev_b);//<<<30,256>>>LL::30个sm，30个block；32t/w  * (128/16)
+   // record stop event on the default stream
+    cudaEventRecord(stop);
+    // wait until the stop event completes
+    cudaEventSynchronize(stop);
+    // calculate the elapsed time between two events
+    float time;
+    cudaEventElapsedTime(&time, start, stop);
+    printf("Time_mulKernel is %f ms.\n\n", time);
+    // clean up the two events
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+
+    cudaStatus = cudaGetLastError();
+    if (cudaStatus != cudaSuccess){
+        printf("cudaStatus_7=%d \n", cudaStatus);
+        goto Error;
+    }
+
+    cudaStatus = cudaDeviceSynchronize();
+    if (cudaStatus != cudaSuccess){
+        printf("cudaStatus_8=%d \n", cudaStatus);
+        goto Error;
+    }
+        
+    cudaStatus = cudaMemcpy(c, dev_c, MATRIX_GLOBAL_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
+    if (cudaStatus != cudaSuccess){
+        printf("cudaStatus_9=%d \n", cudaStatus);
+        goto Error;
+    }
+
+Error:
+    cudaFree(dev_a);
+    cudaFree(dev_b);
+    cudaFree(dev_c);
+
+    return cudaStatus;
+}
+
+cudaError_t mulMatrixWithTensorCore(float* c, float* a, float* b, int m, int n, int k)
+{
+    float *dev_a = NULL;
+    float *dev_b = NULL;
+    float* dev_c = NULL;
+    cudaError_t cudaStatus = cudaSuccess;
+
+    cublasHandle_t handle;
+    CHECK_CUBLAS(cublasCreate(&handle));
+
+    float alpha = 1.0f;
+    float beta = 0.0f;
+
+    cudaStatus = cudaSetDevice(0);
+    if (cudaStatus != cudaSuccess){
+        printf("cudaStatus_1=%d \n", cudaStatus);
+        goto Error;
+    }
+
+    cudaStatus = cudaMalloc((float**)&dev_c, MATRIX_GLOBAL_SIZE * sizeof(float));
+    if (cudaStatus != cudaSuccess){
+        printf("cudaStatus_2=%d \n", cudaStatus);
+        goto Error;
+    }
+
+    cudaStatus = cudaMalloc((float**)&dev_a, M_MAT_A_ROW_NUM * K_MAT_A_COLUMN_NUM * sizeof(float));
+    if (cudaStatus != cudaSuccess) {
+        printf("cudaStatus_3=%d \n", cudaStatus);
+        goto Error;
+    }
+
+    cudaStatus=cudaMalloc((float**)&dev_b,K_MAT_B_ROW_NUM*N_MAT_B_COLUMN_NUM*sizeof(float));
+    if (cudaStatus != cudaSuccess) {
+        printf("cudaStatus_4=%d \n", cudaStatus);
+        goto Error;
+    }
+
+    cudaStatus = cudaMemcpy(dev_a, a, M_MAT_A_ROW_NUM * K_MAT_A_COLUMN_NUM * sizeof(float), cudaMemcpyHostToDevice);
+    if (cudaStatus != cudaSuccess) {
+        printf("cudaStatus_5=%d \n", cudaStatus);
+        goto Error;
+    }
+
+    cudaStatus = cudaMemcpy(dev_b, b, K_MAT_B_ROW_NUM * N_MAT_B_COLUMN_NUM * sizeof(float), cudaMemcpyHostToDevice);
+    if (cudaStatus != cudaSuccess) {
+        printf("cudaStatus_6=%d \n", cudaStatus);
+        goto Error;
+    }
+
+    blank_warmingGPU << <1, 1 >> > ();
+    // create two events
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    // record start event on the default stream
+    cudaEventRecord(start);
+    // execute kernel
+
+    // // Result in column-major format
+    // CHECK_CUBLAS(cublasGemmEx(handle,
+    //                           CUBLAS_OP_N, CUBLAS_OP_N,
+    //                           m, n, k,
+    //                           &alpha,
+    //                           dev_a, CUDA_R_32F, m,
+    //                           dev_b, CUDA_R_32F, k,
+    //                           &beta,
+    //                           dev_c, CUDA_R_32F, m,
+    //                           CUDA_R_32F,
+    //                           CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+    // Result in row-major format
+    CHECK_CUBLAS(cublasGemmEx(handle,
+                              CUBLAS_OP_N, CUBLAS_OP_N,
+                              m, n, k,
+                              &alpha,
+                              dev_b, CUDA_R_32F, k,
+                              dev_a, CUDA_R_32F, m,
+                              &beta,
+                              dev_c, CUDA_R_32F, m,
+                              CUDA_R_32F,
+                              CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+
+    CHECK_CUBLAS(cublasDestroy(handle));
+   // record stop event on the default stream
+    cudaEventRecord(stop);
+    // wait until the stop event completes
+    cudaEventSynchronize(stop);
+    // calculate the elapsed time between two events
+    float time;
+    cudaEventElapsedTime(&time, start, stop);
+    printf("Time_TcKernel is %f ms.\n\n", time);
+    // clean up the two events
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+
+    cudaStatus = cudaGetLastError();
+    if (cudaStatus != cudaSuccess){
+        printf("cudaStatus_7=%d \n", cudaStatus);
+        goto Error;
+    }
+
+    cudaStatus = cudaDeviceSynchronize();
+    if (cudaStatus != cudaSuccess){
+        printf("cudaStatus_8=%d \n", cudaStatus);
+        goto Error;
+    }
+        
+    cudaStatus = cudaMemcpy(c, dev_c, MATRIX_GLOBAL_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
+    if (cudaStatus != cudaSuccess){
+        printf("cudaStatus_9=%d \n", cudaStatus);
+        goto Error;
+    }
+
+Error:
+    cudaFree(dev_a);
+    cudaFree(dev_b);
+    cudaFree(dev_c);
+
+    return cudaStatus;
+}
