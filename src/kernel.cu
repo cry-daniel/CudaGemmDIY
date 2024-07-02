@@ -3,6 +3,7 @@
 #include "device_launch_parameters.h"
 #include <omp.h>
 #include <iostream>
+#include <mma.h>
 
 #define A100
 #ifdef A100
@@ -14,6 +15,12 @@
 #define CUDA_CORE_PER_SM        128
 #define CUDA_CORE_PER_WARP      16
 #endif
+
+#define WMMA_M 16
+#define WMMA_N 16
+#define WMMA_K 16
+
+using namespace nvcuda;
 
 #define CHECK_CUDA(call) { \
     const cudaError_t error = call; \
@@ -194,3 +201,66 @@ cudaError_t mulMatrixWithCublasTC(float* c, float* a, float* b, int m, int k, in
     return cudaStatus;
 }
 
+inline __device__ __host__ size_t div_ceil(size_t a, size_t b) {
+    return (a % b != 0) ? (a / b + 1) : (a / b);
+}
+
+__global__ void wmmaNaiveKernel(half *C, half *A, half *B, size_t M,
+                                size_t K, size_t N) {
+    const size_t K_tiles = div_ceil(K, WMMA_K);
+
+    const size_t warp_row = blockIdx.y * WMMA_M;
+    const size_t warp_col = blockIdx.x * WMMA_N;
+
+    if (warp_row >= M && warp_col >= N) {
+        return;
+    }
+
+    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, half> C_frag;
+
+    wmma::fill_fragment(C_frag, 0.0);
+
+#pragma unroll
+    for (size_t i = 0; i < K_tiles; ++i) {
+        wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major> A_frag;
+        wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major> B_frag;
+
+        wmma::load_matrix_sync(A_frag, A + warp_row * K + i * WMMA_K, K);
+        wmma::load_matrix_sync(B_frag, B + i * WMMA_K + warp_col * K, K);
+
+        wmma::mma_sync(C_frag, A_frag, B_frag, C_frag);
+    }
+
+    wmma::store_matrix_sync(C + warp_row * N + warp_col, C_frag, N, wmma::mem_row_major);
+}
+
+// A: row major; B: row major; C: row major;
+cudaError_t mulMatrixWithWmmaTC(half* c, half* a, half* b, size_t m, size_t k, size_t n)
+{
+    cudaError_t cudaStatus = cudaSuccess;
+    blank_warmingGPU << <1, 1 >> > ();
+    // create two events
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    // record start event on the default stream
+    cudaEventRecord(start);
+    // execute kernel
+    wmmaNaiveKernel << <SM_NUM, 32*CUDA_CORE_PER_SM / CUDA_CORE_PER_WARP >> > (c, a, b, m, k, n);
+   // record stop event on the default stream
+    cudaEventRecord(stop);
+    // wait until the stop event completes
+    cudaEventSynchronize(stop);
+    // calculate the elapsed time between two events
+    float time;
+    cudaEventElapsedTime(&time, start, stop);
+    printf("Time_wmma_tc is %f ms.\n\n", time);
+    // clean up the two events
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+
+    CHECK_CUDA(cudaGetLastError());
+    CHECK_CUDA(cudaDeviceSynchronize());
+
+    return cudaStatus;
+}

@@ -15,7 +15,7 @@ CC = nvcc
 
 $(TARGETBIN):$(TEST_SOURCE) src/kernel.cu
 	mkdir -p $(BIN_DIR)
-	$(CC) $(TEST_SOURCE) --compiler-options=-fopenmp -lcublas -o $(TARGETBIN)
+	$(CC) $(TEST_SOURCE) --compiler-options=-fopenmp -lcublas -arch=sm_75 -o $(TARGETBIN)
 	$(TARGETBIN)
 
 .PHONY:clean
