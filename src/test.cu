@@ -2,7 +2,7 @@
 
 // #define CheckWithCPU
 
-#define SCALE 340
+#define SCALE 512
 #define M SCALE
 #define K SCALE
 #define N SCALE
