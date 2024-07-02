@@ -168,10 +168,10 @@ cudaError_t mulMatrixWithCublasTC(float* c, float* a, float* b, int m, int k, in
                               CUBLAS_OP_N, CUBLAS_OP_N,
                               n, m, k,
                               &alpha,
-                              b, CUDA_R_32F, n,
-                              a, CUDA_R_32F, k,
+                              b, CUDA_R_16F, n,
+                              a, CUDA_R_16F, k,
                               &beta,
-                              c, CUDA_R_32F, n,
+                              c, CUDA_R_16F, n,
                               CUDA_R_32F,
                               CUBLAS_GEMM_DEFAULT_TENSOR_OP));
 
