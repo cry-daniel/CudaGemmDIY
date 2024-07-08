@@ -16,6 +16,7 @@
 #define CUDA_CORE_PER_WARP      16
 #endif
 
+#define WARP_SIZE 32
 #define WMMA_M 16
 #define WMMA_N 16
 #define WMMA_K 16
@@ -41,7 +42,7 @@ using namespace nvcuda;
 
 __global__ void blank_warmingGPU() {}
 
-// A: row major; B: row major; C: row major;
+// A: row major; B: col major; C: row major;
 void mulMatrixWithCpu(float* c, float* a, float* b, int m, int k, int n)
 {
     int i_x = 0, i_y = 0;
@@ -52,12 +53,12 @@ void mulMatrixWithCpu(float* c, float* a, float* b, int m, int k, int n)
         i_y = i % n;  //i_y column of B;
         for (int j = 0;j < k;j++)
         {
-            c[i] += a[i_x * k + j] * b[j * n + i_y];
+            c[i] += a[i_x * k + j] * b[j + i_y * n];
         }   
     }
 }
 
-// A: row major; B: row major; C: row major;
+// A: row major; B: col major; C: row major;
 __global__ void mulKernel(float* c, float* a, float* b, int m, int k, int n)
 {
     int i = 0;
@@ -68,12 +69,12 @@ __global__ void mulKernel(float* c, float* a, float* b, int m, int k, int n)
         j = index % n;
         for (int l = 0; l < k; l++)
         {
-            c[index] += a[i * k + l] * b[l * n + j];
+            c[index] += a[i * k + l] * b[l + j * n];
         }
     }
 }
 
-// A: row major; B: row major; C: row major;
+// A: row major; B: col major; C: row major;
 cudaError_t mulMatrixWithNaiveCuda(float* c, float* a, float* b, int m, int k, int n)
 {
     cudaError_t cudaStatus = cudaSuccess;
@@ -104,7 +105,7 @@ cudaError_t mulMatrixWithNaiveCuda(float* c, float* a, float* b, int m, int k, i
     return cudaStatus;
 }
 
-// A: row major; B: row major; C: row major;
+// A: row major; B: col major; C: row major;
 /* Cublas Cuda perform almost same as Cublas TC, since parameter 'cublasGemmAlgo_t' doesn't have effect on NVIDIA Ampere architecture GPUs (A100) and newer. (https://docs.nvidia.com/cuda/cublas/index.html?highlight=gemmEx#cublasgemmalgo-t) */
 cudaError_t mulMatrixWithCublasCuda(float* c, float* a, float* b, int m, int k, int n)
 {
@@ -124,7 +125,7 @@ cudaError_t mulMatrixWithCublasCuda(float* c, float* a, float* b, int m, int k, 
     // execute kernel
     // Result in row-major format
     CHECK_CUBLAS(cublasGemmEx(handle,
-                              CUBLAS_OP_N, CUBLAS_OP_N,
+                              CUBLAS_OP_T, CUBLAS_OP_N,
                               n, m, k,
                               &alpha,
                               b, CUDA_R_32F, n,
@@ -153,7 +154,7 @@ cudaError_t mulMatrixWithCublasCuda(float* c, float* a, float* b, int m, int k, 
     return cudaStatus;
 }
 
-// A: row major; B: row major; C: row major;
+// A: row major; B: col major; C: row major;
 cudaError_t mulMatrixWithCublasTC(float* c, float* a, float* b, int m, int k, int n)
 {
     cudaError_t cudaStatus = cudaSuccess;
@@ -172,7 +173,7 @@ cudaError_t mulMatrixWithCublasTC(float* c, float* a, float* b, int m, int k, in
     // execute kernel
     // Result in row-major format
     CHECK_CUBLAS(cublasGemmEx(handle,
-                              CUBLAS_OP_N, CUBLAS_OP_N,
+                              CUBLAS_OP_T, CUBLAS_OP_N,
                               n, m, k,
                               &alpha,
                               b, CUDA_R_32F, n,
@@ -205,7 +206,8 @@ inline __device__ __host__ size_t div_ceil(size_t a, size_t b) {
     return (a % b != 0) ? (a / b + 1) : (a / b);
 }
 
-__global__ void wmmaNaiveKernel(half *C, half *A, half *B, size_t M,
+template <typename T>
+__global__ void wmmaNaiveKernel(T *C, T *A, T *B, size_t M,
                                 size_t K, size_t N) {
     const size_t K_tiles = div_ceil(K, WMMA_K);
 
@@ -216,14 +218,14 @@ __global__ void wmmaNaiveKernel(half *C, half *A, half *B, size_t M,
         return;
     }
 
-    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, half> C_frag;
+    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, T> C_frag;
 
     wmma::fill_fragment(C_frag, 0.0);
 
 #pragma unroll
     for (size_t i = 0; i < K_tiles; ++i) {
-        wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major> A_frag;
-        wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major> B_frag;
+        wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, T, wmma::row_major> A_frag;
+        wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, T, wmma::col_major> B_frag;
 
         wmma::load_matrix_sync(A_frag, A + warp_row * K + i * WMMA_K, K);
         wmma::load_matrix_sync(B_frag, B + i * WMMA_K + warp_col * K, K);
@@ -234,8 +236,9 @@ __global__ void wmmaNaiveKernel(half *C, half *A, half *B, size_t M,
     wmma::store_matrix_sync(C + warp_row * N + warp_col, C_frag, N, wmma::mem_row_major);
 }
 
-// A: row major; B: row major; C: row major;
-cudaError_t mulMatrixWithWmmaTC(half* c, half* a, half* b, size_t m, size_t k, size_t n)
+// A: row major; B: col major; C: row major;
+template <typename T>
+cudaError_t mulMatrixWithWmmaTC(T* c, T* a, T* b, size_t m, size_t k, size_t n)
 {
     cudaError_t cudaStatus = cudaSuccess;
     blank_warmingGPU << <1, 1 >> > ();
@@ -246,8 +249,11 @@ cudaError_t mulMatrixWithWmmaTC(half* c, half* a, half* b, size_t m, size_t k, s
     // record start event on the default stream
     cudaEventRecord(start);
     // execute kernel
-    wmmaNaiveKernel << <SM_NUM, 32*CUDA_CORE_PER_SM / CUDA_CORE_PER_WARP >> > (c, a, b, m, k, n);
-   // record stop event on the default stream
+    // wmmaNaiveKernel << <SM_NUM, 32*CUDA_CORE_PER_SM / CUDA_CORE_PER_WARP >> > (c, a, b, m, k, n);
+    dim3 block(WARP_SIZE);
+    dim3 grid(div_ceil(n, WMMA_N), div_ceil(m, WMMA_M));
+    wmmaNaiveKernel<<<grid, block>>>(c, a, b, m, k, n);
+    // record stop event on the default stream
     cudaEventRecord(stop);
     // wait until the stop event completes
     cudaEventSynchronize(stop);
