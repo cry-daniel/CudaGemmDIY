@@ -2,7 +2,7 @@
 
 // #define CheckWithCPU
 
-#define SCALE 128
+#define SCALE 2048
 #define M SCALE
 #define K SCALE
 #define N SCALE
@@ -25,7 +25,7 @@ int main(){
     float* h_c_cublas_tc = (float*)malloc(MATRIX_GLOBAL_SIZE*sizeof(float));
     float* h_c_cublas_cuda = (float*)malloc(MATRIX_GLOBAL_SIZE*sizeof(float));
     half* h_c_wmma_tc_half = (half*)malloc(MATRIX_GLOBAL_SIZE*sizeof(half));
-    // float* h_c_wmma_tc = (float*)malloc(MATRIX_GLOBAL_SIZE*sizeof(float));
+    half* h_c_mix_wmma_tc_half = (half*)malloc(MATRIX_GLOBAL_SIZE*sizeof(half));
     srand((unsigned)time(NULL));
     for(int i=0;i< MATRIX_GLOBAL_SIZE;i++)
     {
@@ -34,7 +34,7 @@ int main(){
         h_c_cublas_tc[i] = 0.0;
         h_c_cublas_cuda[i] = 0.0;
         h_c_wmma_tc_half[i] = 0.0;
-        // h_c_wmma_tc[i] = 0.0;
+        h_c_mix_wmma_tc_half[i] = 0.0;
     }
     for (int i = 0; i < M_MAT_A_ROW_NUM * K_MAT_A_COLUMN_NUM; i++){
         // h_a[i] = i%7;
@@ -50,7 +50,7 @@ int main(){
 
     //device memory allocate
     float *d_a, *d_b, *d_c_naive_cuda, *d_c_cublas_tc, *d_c_cublas_cuda;
-    // float *d_c_wmma_tc;
+    half *temp, *temp_;
     half *d_a_half, *d_b_half, *d_c_wmma_tc_half;
     CHECK_CUDA(cudaMalloc(&d_a, M_MAT_A_ROW_NUM * K_MAT_A_COLUMN_NUM * sizeof(float)))
     CHECK_CUDA(cudaMalloc(&d_b, K_MAT_B_ROW_NUM * N_MAT_B_COLUMN_NUM * sizeof(float)))
@@ -60,25 +60,27 @@ int main(){
     CHECK_CUDA(cudaMalloc(&d_a_half, M_MAT_A_ROW_NUM * K_MAT_A_COLUMN_NUM * sizeof(half)))
     CHECK_CUDA(cudaMalloc(&d_b_half, K_MAT_B_ROW_NUM * N_MAT_B_COLUMN_NUM * sizeof(half)))
     CHECK_CUDA(cudaMalloc(&d_c_wmma_tc_half, MATRIX_GLOBAL_SIZE * sizeof(half)))
-    // CHECK_CUDA(cudaMalloc(&d_c_wmma_tc, MATRIX_GLOBAL_SIZE * sizeof(float)))
+    CHECK_CUDA(cudaMalloc(&temp, MATRIX_GLOBAL_SIZE * sizeof(half)))
+    CHECK_CUDA(cudaMalloc(&temp_, MATRIX_GLOBAL_SIZE * sizeof(half)))
 
     CHECK_CUDA(cudaMemcpy(d_a, h_a, M_MAT_A_ROW_NUM * K_MAT_A_COLUMN_NUM * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(d_b, h_b, K_MAT_B_ROW_NUM * N_MAT_B_COLUMN_NUM * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(d_a_half, h_a_half, M_MAT_A_ROW_NUM * K_MAT_A_COLUMN_NUM * sizeof(half), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(d_b_half, h_b_half, K_MAT_B_ROW_NUM * N_MAT_B_COLUMN_NUM * sizeof(half), cudaMemcpyHostToDevice));
 
-    CHECK_CUDA(mulMatrixWithNaiveCuda(d_c_naive_cuda, d_a, d_b, M, K, N));
+    // CHECK_CUDA(mulMatrixWithCublasTC(d_c_cublas_tc, d_a, d_b, M, K, N));
+    // CHECK_CUDA(mulMatrixWithNaiveCuda(d_c_naive_cuda, d_a, d_b, M, K, N));
     // CHECK_CUDA(mulMatrixWithCublasCuda(d_c_cublas_cuda, d_a, d_b, M, K, N));
-    CHECK_CUDA(mulMatrixWithCublasTC(d_c_cublas_tc, d_a, d_b, M, K, N));
-    CHECK_CUDA(mulMatrixWithWmmaTC(d_c_wmma_tc_half, d_a_half, d_b_half, M, K, N));
-    // CHECK_CUDA(mulMatrixWithWmmaTC(d_c_wmma_tc, d_a, d_b, M, K, N));
+    // CHECK_CUDA(mulMatrixWithWmmaTC(d_c_wmma_tc_half, d_a_half, d_b_half, M, K, N));
+    CHECK_CUDA(mulMatrixWithNaiveCuda(temp, d_a_half, d_b_half, M, K, N));
+    CHECK_CUDA(mulMatrixWithSeqWmmaTC(temp, temp_, d_a_half, d_b_half, M, K, N));
+    CHECK_CUDA(mulMatrixWithMixedWmmaTC(temp, temp_, d_a_half, d_b_half, M, K, N));
     // CHECK_CUDA(mulMatrixWithCublasCuda(d_c_cublas_cuda, d_a, d_b, M, K, N));
 
     CHECK_CUDA(cudaMemcpy(h_c_naive_cuda, d_c_naive_cuda, MATRIX_GLOBAL_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(h_c_cublas_tc, d_c_cublas_tc, MATRIX_GLOBAL_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(h_c_cublas_cuda, d_c_cublas_tc, MATRIX_GLOBAL_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(h_c_wmma_tc_half, d_c_wmma_tc_half, MATRIX_GLOBAL_SIZE * sizeof(half), cudaMemcpyDeviceToHost));
-    // CHECK_CUDA(cudaMemcpy(h_c_wmma_tc, d_c_wmma_tc, MATRIX_GLOBAL_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
 
 #ifdef CheckWithCPU
     mulMatrixWithCpu(h_c_cpu, h_a, h_b, M, K, N);
